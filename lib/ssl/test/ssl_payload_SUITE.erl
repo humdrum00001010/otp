@@ -711,12 +711,14 @@ server_echos_passive(Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostn
 server_echos_passive_chunk(
   Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostname) ->
     Length = byte_size(Data),
+    %% Use a large kernel receive buffer and retain fragmented reads.
     Server =
         ssl_test_lib:start_server(
           [{node, ServerNode}, {port, 0},
            {from, self()},
            {mfa, {?MODULE, echoer_chunk, [Length]}},
-           {options, [{active, false}, {mode, binary} | ServerOpts]}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ServerOpts]}]),
     Port = ssl_test_lib:inet_port(Server),
     Client =
         ssl_test_lib:start_client(
@@ -724,7 +726,8 @@ server_echos_passive_chunk(
            {host, Hostname},
            {from, self()},
            {mfa, {?MODULE, sender, [Data]}},
-           {options, [{active, false}, {mode, binary} | ClientOpts]}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ClientOpts]}]),
     %%
     ssl_test_lib:check_result(Server, ok, Client, ok),
     %%
@@ -805,12 +808,14 @@ client_echos_passive(
 client_echos_passive_chunk(
   Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostname) ->
     Length = byte_size(Data),
+    %% Use a large kernel receive buffer and retain fragmented reads.
     Server =
         ssl_test_lib:start_server(
           [{node, ServerNode}, {port, 0},
            {from, self()},
            {mfa, {?MODULE, sender, [Data]}},
-           {options, [{active, false}, {mode, binary} | ServerOpts] ++ ssl_test_lib:bigger_buffers()}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ServerOpts] ++ ssl_test_lib:bigger_buffers()}]),
     Port = ssl_test_lib:inet_port(Server),
     Client =
         ssl_test_lib:start_client(
@@ -818,7 +823,8 @@ client_echos_passive_chunk(
            {host, Hostname},
            {from, self()},
            {mfa, {?MODULE, echoer_chunk, [Length]}},
-           {options, [{active, false}, {mode, binary} | ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
     %%
     ssl_test_lib:check_result(Server, ok, Client, ok),
     %%
