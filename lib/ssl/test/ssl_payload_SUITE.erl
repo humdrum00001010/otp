@@ -127,7 +127,9 @@ all() ->
 
 groups() ->
     [
-     {'tlsv1.3', [parallel], [buffer_sender | payload_tests()]},
+     %% Temporary repetitions to capture the intermittent payload timeout.
+     {'tlsv1.3', [parallel, {repeat_until_any_fail, 50}],
+      [buffer_sender | payload_tests()]},
      {'tlsv1.2', [parallel], payload_tests()},
      {'tlsv1.1', [parallel], payload_tests()},
      {'tlsv1', [parallel], payload_tests()},
@@ -903,8 +905,7 @@ client_active_once_server_close(
 send(_Socket, _Data, 0, _) ->
     ok;
 send(Socket, Data, Count, RecvEcho) ->
-    put(payload_progress, {send, Count, Socket}),
-    spawn(fun() -> payload_send(Socket, Data) end),
+    spawn(fun() -> ssl:send(Socket, Data) end),
     RecvEcho(),
     send(Socket, Data, Count - 1, RecvEcho).
 
@@ -963,9 +964,8 @@ echo_recv(Socket, Size) ->
 echo_recv_chunk(_Socket, _, 0) ->
     ok;
 echo_recv_chunk(Socket, ChunkSize, Size) ->
-    put(payload_progress, {echo, Size, Socket}),
     {ok, Data} = ssl:recv(Socket, ChunkSize),
-    spawn(fun() -> payload_send(Socket, Data) end),
+    spawn(fun() -> ssl:send(Socket, Data) end),
     echo_recv_chunk(Socket, ChunkSize, Size - ChunkSize).
 
 
@@ -996,12 +996,6 @@ echo_active(Socket, Size) ->
 
 %% Temporary diagnostics for the intermittent passive chunk timeout.
 %% Keep payloads and TLS key material out of the test log.
-payload_send(Socket, Data) ->
-    case ssl:send(Socket, Data) of
-        ok -> ok;
-        Error -> ct:log("Payload send ~p returned ~p", [self(), Error])
-    end.
-
 payload_watch(Ref, Pids) ->
     receive
         done -> ok;
@@ -1012,27 +1006,22 @@ payload_watch(Ref, Pids) ->
     end.
 
 payload_process(Pid) ->
-    Info = payload_process_info(Pid),
-    case process_info(Pid, dictionary) of
-        {dictionary, Dictionary} ->
-            case proplists:get_value(payload_progress, Dictionary) of
-                {Where, Remaining, #sslsocket{connection_handler = Connection,
-                                             payload_sender = Sender}} ->
-                    #{pid => Pid, process => Info, operation => Where,
-                      remaining => Remaining,
-                      connection => payload_connection(Connection),
-                      sender => payload_process_info(Sender)};
-                _ -> #{pid => Pid, process => Info}
-            end;
-        _ -> #{pid => Pid, process => Info}
-    end.
+    Monitors = case process_info(Pid, monitored_by) of
+                   {monitored_by, Pids} -> Pids;
+                   undefined -> []
+               end,
+    #{pid => Pid, process => payload_process_info(Pid),
+      connections => [payload_connection(P, Pid) || P <- Monitors,
+                                                   is_pid(P)]}.
 
 payload_process_info(Pid) ->
     process_info(Pid, [status, current_stacktrace, message_queue_len]).
 
-payload_connection(Pid) ->
+payload_connection(Pid, Owner) ->
     try sys:get_state(Pid, 1000) of
-        {Name, #state{recv = #recv{from = From, bytes_to_read = Bytes},
+        {Name, #state{connection_env = #connection_env{user_application = {_, Owner}},
+                      recv = #recv{from = From, bytes_to_read = Bytes},
+                      socket_options = #socket_options{packet = Packet, active = Active},
                       user_data_buffer = {_, Size, _},
                       protocol_specific = Protocol,
                       protocol_buffers = Buffers,
@@ -1042,19 +1031,28 @@ payload_connection(Pid) ->
                                                transport_cb = Transport}}} ->
             #{state => Name, receiving => From =/= undefined,
               bytes_to_read => Bytes, buffered_bytes => Size,
+              packet => Packet, active => Active,
               handshake_events => Events,
               flow_control => maps:with(
                   [active_n, active_n_toggle, socket_active], Protocol),
               encrypted_records => length(Buffers#protocol_buffers.tls_cipher_texts),
+              partial_record_bytes =>
+                  case Buffers#protocol_buffers.tls_record_buffer of
+                      <<>> -> 0;
+                      {_, {_, Pending, _}} -> Pending;
+                      _ -> unknown
+                  end,
               transport => payload_transport(Transport, Socket),
-              process => payload_process_info(Pid)}
+              process => payload_process_info(Pid),
+              sender => payload_process_info(maps:get(sender, Protocol))};
+        _ -> unrelated_monitor
     catch
-        Class:Reason -> #{unavailable => {Class, Reason},
+        Class:_ -> #{unavailable => Class,
                           process => payload_process_info(Pid)}
     end.
 
 payload_transport(gen_tcp, Socket) ->
-    #{options => inet:getopts(Socket, [active, buffer, recbuf, sndbuf]),
+    #{options => inet:getopts(Socket, [active, packet, buffer, recbuf, sndbuf]),
       stats => inet:getstat(Socket)};
 payload_transport(Transport, _) ->
     Transport.
