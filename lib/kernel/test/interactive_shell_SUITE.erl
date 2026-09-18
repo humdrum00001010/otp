@@ -1000,8 +1000,12 @@ shell_combining_unicode(Config) ->
                 shell_test_lib:send_tty(Term,"BSpace"),
                 shell_test_lib:check_location(Term, {X,0}),
                 shell_test_lib:send_tty(Term,[$",$a,J,$b,$",$.,10]),
+                %% The old prompt has the same cursor position. Wait for
+                %% this expression to finish before checking the new one.
+                shell_test_lib:check_content(
+                  Term, integer_to_list(Prompt) ++ ">$"),
                 shell_test_lib:check_location(Term, {X,0})
-            end || J <- CombiningUnicode],
+            end || {J, Prompt} <- lists:zip(CombiningUnicode, [3,4,5])],
         ok
     after
         shell_test_lib:stop_tty(Term)
