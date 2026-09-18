@@ -729,14 +729,7 @@ server_echos_passive_chunk(
            {mfa, {?MODULE, sender, [Data]}},
            {options, [{active, false}, {mode, binary} | ClientOpts]}]),
     %%
-    Test = self(),
-    Watch = spawn(fun() ->
-        Ref = monitor(process, Test),
-        payload_watch(Ref, [Server, Client])
-    end),
-    try ssl_test_lib:check_result(Server, ok, Client, ok)
-    after Watch ! done
-    end,
+    check_chunk_result(Server, Client),
     %%
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -830,7 +823,7 @@ client_echos_passive_chunk(
            {mfa, {?MODULE, echoer_chunk, [Length]}},
            {options, [{active, false}, {mode, binary} | ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
     %%
-    ssl_test_lib:check_result(Server, ok, Client, ok),
+    check_chunk_result(Server, Client),
     %%
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -996,6 +989,16 @@ echo_active(Socket, Size) ->
 
 %% Temporary diagnostics for the intermittent passive chunk timeout.
 %% Keep payloads and TLS key material out of the test log.
+check_chunk_result(Server, Client) ->
+    Test = self(),
+    Watch = spawn(fun() ->
+        Ref = monitor(process, Test),
+        payload_watch(Ref, [Server, Client])
+    end),
+    try ssl_test_lib:check_result(Server, ok, Client, ok)
+    after Watch ! done
+    end.
+
 payload_watch(Ref, Pids) ->
     receive
         done -> ok;
