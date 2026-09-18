@@ -2569,8 +2569,8 @@ differing_cookies(Config) when is_list(Config) ->
 
             %% Verify the cluster
             equal_sets( [NodeA, NodeB], nodes(hidden) ),
-            [ Node ] = rpc:call( NodeA, erlang, nodes, [hidden] ),
-            [ Node ] = rpc:call( NodeB, erlang, nodes, [hidden] ),
+            [ Node ] = rpc:call( NodeA, ?MODULE, wait_node_down, [NodeB] ),
+            [ Node ] = rpc:call( NodeB, ?MODULE, wait_node_down, [NodeA] ),
 
             %% Reconnect, now node B -> A
             pong = rpc:call( NodeB, net_adm, ping, [NodeA] ),
