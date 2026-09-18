@@ -25,6 +25,7 @@
 -behaviour(ct_suite).
 
 -include("ssl_test_lib.hrl").
+-include_lib("ssl/src/tls_connection.hrl").
 -include_lib("common_test/include/ct.hrl").
 %% Common test
 -export([all/0,
@@ -726,7 +727,14 @@ server_echos_passive_chunk(
            {mfa, {?MODULE, sender, [Data]}},
            {options, [{active, false}, {mode, binary} | ClientOpts]}]),
     %%
-    ssl_test_lib:check_result(Server, ok, Client, ok),
+    Test = self(),
+    Watch = spawn(fun() ->
+        Ref = monitor(process, Test),
+        payload_watch(Ref, [Server, Client])
+    end),
+    try ssl_test_lib:check_result(Server, ok, Client, ok)
+    after Watch ! done
+    end,
     %%
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -895,7 +903,8 @@ client_active_once_server_close(
 send(_Socket, _Data, 0, _) ->
     ok;
 send(Socket, Data, Count, RecvEcho) ->
-    spawn(fun() -> ssl:send(Socket, Data) end),
+    put(payload_progress, {send, Count, Socket}),
+    spawn(fun() -> payload_send(Socket, Data) end),
     RecvEcho(),
     send(Socket, Data, Count - 1, RecvEcho).
 
@@ -954,8 +963,9 @@ echo_recv(Socket, Size) ->
 echo_recv_chunk(_Socket, _, 0) ->
     ok;
 echo_recv_chunk(Socket, ChunkSize, Size) ->
+    put(payload_progress, {echo, Size, Socket}),
     {ok, Data} = ssl:recv(Socket, ChunkSize),
-    spawn(fun() -> ssl:send(Socket, Data) end),
+    spawn(fun() -> payload_send(Socket, Data) end),
     echo_recv_chunk(Socket, ChunkSize, Size - ChunkSize).
 
 
@@ -982,3 +992,69 @@ echo_active(Socket, Size) ->
     end.    
         
 
+
+
+%% Temporary diagnostics for the intermittent passive chunk timeout.
+%% Keep payloads and TLS key material out of the test log.
+payload_send(Socket, Data) ->
+    case ssl:send(Socket, Data) of
+        ok -> ok;
+        Error -> ct:log("Payload send ~p returned ~p", [self(), Error])
+    end.
+
+payload_watch(Ref, Pids) ->
+    receive
+        done -> ok;
+        {'DOWN', Ref, process, _, _} -> ok
+    after 10000 ->
+        ct:log("Payload transfer progress: ~p", [[payload_process(P) || P <- Pids]]),
+        payload_watch(Ref, Pids)
+    end.
+
+payload_process(Pid) ->
+    Info = payload_process_info(Pid),
+    case process_info(Pid, dictionary) of
+        {dictionary, Dictionary} ->
+            case proplists:get_value(payload_progress, Dictionary) of
+                {Where, Remaining, #sslsocket{connection_handler = Connection,
+                                             payload_sender = Sender}} ->
+                    #{pid => Pid, process => Info, operation => Where,
+                      remaining => Remaining,
+                      connection => payload_connection(Connection),
+                      sender => payload_process_info(Sender)};
+                _ -> #{pid => Pid, process => Info}
+            end;
+        _ -> #{pid => Pid, process => Info}
+    end.
+
+payload_process_info(Pid) ->
+    process_info(Pid, [status, current_stacktrace, message_queue_len]).
+
+payload_connection(Pid) ->
+    try sys:get_state(Pid, 1000) of
+        {Name, #state{recv = #recv{from = From, bytes_to_read = Bytes},
+                      user_data_buffer = {_, Size, _},
+                      protocol_specific = Protocol,
+                      protocol_buffers = Buffers,
+                      handshake_env = #handshake_env{
+                          unprocessed_handshake_events = Events},
+                      static_env = #static_env{socket = Socket,
+                                               transport_cb = Transport}}} ->
+            #{state => Name, receiving => From =/= undefined,
+              bytes_to_read => Bytes, buffered_bytes => Size,
+              handshake_events => Events,
+              flow_control => maps:with(
+                  [active_n, active_n_toggle, socket_active], Protocol),
+              encrypted_records => length(Buffers#protocol_buffers.tls_cipher_texts),
+              transport => payload_transport(Transport, Socket),
+              process => payload_process_info(Pid)}
+    catch
+        Class:Reason -> #{unavailable => {Class, Reason},
+                          process => payload_process_info(Pid)}
+    end.
+
+payload_transport(gen_tcp, Socket) ->
+    #{options => inet:getopts(Socket, [active, buffer, recbuf, sndbuf]),
+      stats => inet:getstat(Socket)};
+payload_transport(Transport, _) ->
+    Transport.
