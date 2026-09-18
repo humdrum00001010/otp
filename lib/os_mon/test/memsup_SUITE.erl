@@ -200,24 +200,11 @@ alarm1(_Config, SysUsage) ->
 
     %% If system memory is higher than threshold, make sure the system
     %% alarm is set. Otherwise, make sure it is not set
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when SysP ->
-            ok;
-        false when not SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, SysThreshold})
-    end,
+    ok = check_sys_alarm(SysThreshold),
 
-    %% Lower/raise the threshold to clear/set the alarm
-    NewSysThreshold = if
-                          SysP ->
-                              Value = 1.1*SysUsage,
-                              if
-                                  Value > 0.99 -> 0.99;
-                                  true -> Value
-                              end;
-                          not SysP -> 0.9*SysUsage
+    %% Force the opposite alarm state despite memory fluctuations.
+    NewSysThreshold = if SysP -> 1.0;
+                         not SysP -> 0.0
                       end,
 
     ok = memsup:set_sysmem_high_watermark(NewSysThreshold),
@@ -227,27 +214,13 @@ alarm1(_Config, SysUsage) ->
 
     %% Make sure the alarm is cleared/set
     ct:sleep({seconds,5}),
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when not SysP ->
-            ok;
-        false when SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, NewSysThreshold})
-    end,
+    ok = check_sys_alarm(NewSysThreshold),
 
-    %% Reset the threshold to set/clear the alarm again
+    %% Restore the threshold and check the new collection.
     ok = memsup:set_sysmem_high_watermark(SysThreshold),
     ok = force_collection(),
     ct:sleep({seconds,1}),
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when SysP ->
-            ok;
-        false when not SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, SysThreshold})
-    end,
+    ok = check_sys_alarm(SysThreshold),
 
     %% Check memory usage
     {Total2, _, {WorstPid, PidAlloc}} = memsup:get_memory_data(),
@@ -348,24 +321,11 @@ alarm2(_Config, _SysUsage) ->
 
     %% If system memory is higher than threshold, make sure the system
     %% alarm is set. Otherwise, make sure it is not set
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when SysP ->
-            ok;
-        false when not SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, SysThreshold})
-    end,
+    ok = check_sys_alarm(SysThreshold),
 
-    %% Lower/raise the threshold to clear/set the alarm
-    NewSysThreshold = if
-                          SysP ->
-                              Value = 1.1*SysUsage,
-                              if
-                                  Value > 0.99 -> 0.99;
-                                  true -> Value
-                              end;
-                          not SysP -> 0.9*SysUsage
+    %% Force the opposite alarm state despite memory fluctuations.
+    NewSysThreshold = if SysP -> 1.0;
+                         not SysP -> 0.0
                       end,
 
     ok = memsup:set_sysmem_high_watermark(NewSysThreshold),
@@ -375,27 +335,13 @@ alarm2(_Config, _SysUsage) ->
 
     %% Make sure the alarm is cleared/set
     ct:sleep({seconds,1}),
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when not SysP ->
-            ok;
-        false when SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, NewSysThreshold})
-    end,
+    ok = check_sys_alarm(NewSysThreshold),
 
-    %% Reset the threshold to set/clear the alarm again
+    %% Restore the threshold and check the new collection.
     ok = memsup:set_sysmem_high_watermark(SysThreshold),
     ok = force_collection(),
     ct:sleep({seconds,1}),
-    case alarm_set(system_memory_high_watermark) of
-        {true, []} when SysP ->
-            ok;
-        false when not SysP ->
-            ok;
-        _ ->
-            ct:fail({sys_alarm, SysUsage, SysThreshold})
-    end,
+    ok = check_sys_alarm(SysThreshold),
 
     %% Reset memsup_system_only and restart memsup
     %% (memory check interval is then automatically reset)
@@ -404,6 +350,17 @@ alarm2(_Config, _SysUsage) ->
     {ok, _Memsup2} = supervisor:restart_child(os_mon_sup, memsup),
 
     ok.
+
+%% Memory use can change between collections. Check the alarm against
+%% the data from the collection that just completed.
+check_sys_alarm(Threshold) ->
+    {Total, Alloc, _} = memsup:get_memory_data(),
+    case {Alloc > Threshold * Total,
+          alarm_set(system_memory_high_watermark)} of
+        {true, {true, []}} -> ok;
+        {false, false} -> ok;
+        _ -> ct:fail({sys_alarm, Alloc / Total, Threshold})
+    end.
 
 alarm_set(Alarm) ->
     alarm_set(Alarm, alarm_handler:get_alarms()).
