@@ -25,7 +25,6 @@
 -behaviour(ct_suite).
 
 -include("ssl_test_lib.hrl").
--include_lib("ssl/src/tls_connection.hrl").
 -include_lib("common_test/include/ct.hrl").
 %% Common test
 -export([all/0,
@@ -127,9 +126,7 @@ all() ->
 
 groups() ->
     [
-     %% Temporary repetitions to capture the intermittent payload timeout.
-     {'tlsv1.3', [parallel, {repeat_until_any_fail, 50}],
-      [buffer_sender | payload_tests()]},
+     {'tlsv1.3', [parallel], [buffer_sender | payload_tests()]},
      {'tlsv1.2', [parallel], payload_tests()},
      {'tlsv1.1', [parallel], payload_tests()},
      {'tlsv1', [parallel], payload_tests()},
@@ -714,12 +711,14 @@ server_echos_passive(Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostn
 server_echos_passive_chunk(
   Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostname) ->
     Length = byte_size(Data),
+    %% Use a large kernel receive buffer and retain fragmented reads.
     Server =
         ssl_test_lib:start_server(
           [{node, ServerNode}, {port, 0},
            {from, self()},
            {mfa, {?MODULE, echoer_chunk, [Length]}},
-           {options, [{active, false}, {mode, binary} | ServerOpts]}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ServerOpts]}]),
     Port = ssl_test_lib:inet_port(Server),
     Client =
         ssl_test_lib:start_client(
@@ -727,9 +726,10 @@ server_echos_passive_chunk(
            {host, Hostname},
            {from, self()},
            {mfa, {?MODULE, sender, [Data]}},
-           {options, [{active, false}, {mode, binary} | ClientOpts]}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ClientOpts]}]),
     %%
-    check_chunk_result(Server, Client),
+    ssl_test_lib:check_result(Server, ok, Client, ok),
     %%
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -808,12 +808,14 @@ client_echos_passive(
 client_echos_passive_chunk(
   Data, ClientOpts, ServerOpts, ClientNode, ServerNode, Hostname) ->
     Length = byte_size(Data),
+    %% Use a large kernel receive buffer and retain fragmented reads.
     Server =
         ssl_test_lib:start_server(
           [{node, ServerNode}, {port, 0},
            {from, self()},
            {mfa, {?MODULE, sender, [Data]}},
-           {options, [{active, false}, {mode, binary} | ServerOpts] ++ ssl_test_lib:bigger_buffers()}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ServerOpts] ++ ssl_test_lib:bigger_buffers()}]),
     Port = ssl_test_lib:inet_port(Server),
     Client =
         ssl_test_lib:start_client(
@@ -821,9 +823,10 @@ client_echos_passive_chunk(
            {host, Hostname},
            {from, self()},
            {mfa, {?MODULE, echoer_chunk, [Length]}},
-           {options, [{active, false}, {mode, binary} | ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
+           {options, [{active, false}, {mode, binary},
+                      {buffer, 9216}, {recbuf, 256_000} | ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
     %%
-    check_chunk_result(Server, Client),
+    ssl_test_lib:check_result(Server, ok, Client, ok),
     %%
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -985,77 +988,3 @@ echo_active(Socket, Size) ->
     end.    
         
 
-
-
-%% Temporary diagnostics for the intermittent passive chunk timeout.
-%% Keep payloads and TLS key material out of the test log.
-check_chunk_result(Server, Client) ->
-    Test = self(),
-    Watch = spawn(fun() ->
-        Ref = monitor(process, Test),
-        payload_watch(Ref, [Server, Client])
-    end),
-    try ssl_test_lib:check_result(Server, ok, Client, ok)
-    after Watch ! done
-    end.
-
-payload_watch(Ref, Pids) ->
-    receive
-        done -> ok;
-        {'DOWN', Ref, process, _, _} -> ok
-    after 10000 ->
-        ct:log("Payload transfer progress: ~p", [[payload_process(P) || P <- Pids]]),
-        payload_watch(Ref, Pids)
-    end.
-
-payload_process(Pid) ->
-    Monitors = case process_info(Pid, monitored_by) of
-                   {monitored_by, Pids} -> Pids;
-                   undefined -> []
-               end,
-    #{pid => Pid, process => payload_process_info(Pid),
-      connections => [payload_connection(P, Pid) || P <- Monitors,
-                                                   is_pid(P)]}.
-
-payload_process_info(Pid) ->
-    process_info(Pid, [status, current_stacktrace, message_queue_len]).
-
-payload_connection(Pid, Owner) ->
-    try sys:get_state(Pid, 1000) of
-        {Name, #state{connection_env = #connection_env{user_application = {_, Owner}},
-                      recv = #recv{from = From, bytes_to_read = Bytes},
-                      socket_options = #socket_options{packet = Packet, active = Active},
-                      user_data_buffer = {_, Size, _},
-                      protocol_specific = Protocol,
-                      protocol_buffers = Buffers,
-                      handshake_env = #handshake_env{
-                          unprocessed_handshake_events = Events},
-                      static_env = #static_env{socket = Socket,
-                                               transport_cb = Transport}}} ->
-            #{state => Name, receiving => From =/= undefined,
-              bytes_to_read => Bytes, buffered_bytes => Size,
-              packet => Packet, active => Active,
-              handshake_events => Events,
-              flow_control => maps:with(
-                  [active_n, active_n_toggle, socket_active], Protocol),
-              encrypted_records => length(Buffers#protocol_buffers.tls_cipher_texts),
-              partial_record_bytes =>
-                  case Buffers#protocol_buffers.tls_record_buffer of
-                      <<>> -> 0;
-                      {_, {_, Pending, _}} -> Pending;
-                      _ -> unknown
-                  end,
-              transport => payload_transport(Transport, Socket),
-              process => payload_process_info(Pid),
-              sender => payload_process_info(maps:get(sender, Protocol))};
-        _ -> unrelated_monitor
-    catch
-        Class:_ -> #{unavailable => Class,
-                          process => payload_process_info(Pid)}
-    end.
-
-payload_transport(gen_tcp, Socket) ->
-    #{options => inet:getopts(Socket, [active, packet, buffer, recbuf, sndbuf]),
-      stats => inet:getstat(Socket)};
-payload_transport(Transport, _) ->
-    Transport.
