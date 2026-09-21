@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  *
- * Copyright Ericsson AB 2001-2025. All Rights Reserved.
+ * Copyright Ericsson AB 2001-2026. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,9 +76,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#if defined(__linux__)
-#  include <sys/auxv.h>
-#endif
+#include <unistd.h>
 
 #include "sys.h"
 #include "erl_alloc.h"
@@ -98,9 +96,11 @@
 void sys_thread_init_signal_stack(void) {
     stack_t ss;
 
-#if defined(__linux__) && defined(AT_MINSIGSTKSZ)
-    ss.ss_size = (size_t) getauxval(AT_MINSIGSTKSZ);
-    ss.ss_size = MAX(ss.ss_size, SIGSTKSZ);
+#if defined(_SC_MINSIGSTKSZ)
+    {
+        long min = sysconf(_SC_MINSIGSTKSZ);
+        ss.ss_size = MAX((size_t) (min > 0 ? min : SIGSTKSZ), (size_t) SIGSTKSZ);
+    }
 #else
     ss.ss_size = SIGSTKSZ;
 #endif

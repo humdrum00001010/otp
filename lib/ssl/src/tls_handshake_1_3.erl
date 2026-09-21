@@ -82,6 +82,7 @@
          get_pre_shared_key/4,
          get_pre_shared_key_early_data/2,
          get_supported_groups/1,
+         get_client_signatures/1,
          generate_kex_keys/1,
          hybrid_algs/1,
          calculate_client_early_traffic_secret/5,
@@ -737,8 +738,20 @@ decode_key_update(N) ->
     throw(?ALERT_REC(?FATAL, ?ILLEGAL_PARAMETER, {request_update,N})).
 
 decode_cert_entries(Entries) ->
-    [ #certificate_entry{data = Data, extensions = decode_extensions(BinExts, certificate_request)}
-      || <<?UINT24(DSize), Data:DSize/binary, ?UINT16(Esize), BinExts:Esize/binary>> <= Entries ].
+    decode_cert_entries(Entries, []).
+
+%% RFC 8446 §4.4.2: the CertificateEntry list is fully length-delimited; a
+%% truncated or malformed trailing entry must abort with decode_error rather
+%% than being silently dropped.
+decode_cert_entries(<<>>, Acc) ->
+    lists:reverse(Acc);
+decode_cert_entries(<<?UINT24(DSize), Data:DSize/binary,
+                      ?UINT16(Esize), BinExts:Esize/binary, Rest/binary>>, Acc) ->
+    Entry = #certificate_entry{data = Data,
+                               extensions = decode_extensions(BinExts, certificate_request)},
+    decode_cert_entries(Rest, [Entry | Acc]);
+decode_cert_entries(_Other, _Acc) ->
+    throw(?ALERT_REC(?FATAL, ?DECODE_ERROR, truncated_certificate_entry)).
 
 encode_extensions(Exts)->
     ssl_handshake:encode_extensions(extensions_list(Exts)).
@@ -1193,6 +1206,14 @@ get_supported_groups(undefined = Groups) ->
 get_supported_groups(#supported_groups{supported_groups = Groups}) ->
     {ok, Groups}.
 
+get_client_signatures(Extensions) ->
+    case maps:get(signature_algs, Extensions, undefined) of
+        undefined ->
+            {error, ?ALERT_REC(?FATAL, ?MISSING_EXTENSION, {signature_algs, Extensions})};
+        Value ->
+            {ok, get_signature_scheme_list(Value)}
+    end.
+
 generate_kex_keys(secp256r1) ->
     public_key:generate_key({namedCurve, secp256r1});
 generate_kex_keys(secp384r1) ->
@@ -1216,6 +1237,15 @@ generate_kex_keys(Group) when Group == secp256r1mlkem768;
     {Curve, MLKem} = hybrid_algs(Group),
     {public_key:generate_key({namedCurve, Curve}), 
      crypto:generate_key(MLKem, [])};
+generate_kex_keys(brainpoolP256r1tls13) ->
+    public_key:generate_key({namedCurve, brainpoolP256r1});
+generate_kex_keys(brainpoolP384r1tls13) ->
+    public_key:generate_key({namedCurve, brainpoolP384r1});
+generate_kex_keys(brainpoolP512r1tls13) ->
+    %% The brainpool*tls13 groups are advertised in supported_groups but are
+    %% not FFDHE groups; without an explicit clause they would fall into the
+    %% FFDHE catch-all below and crash in ssl_dh_groups:dh_params/1.
+    public_key:generate_key({namedCurve, brainpoolP512r1});
 generate_kex_keys(FFDHE) ->
     public_key:generate_key(ssl_dh_groups:dh_params(FFDHE)).
 
@@ -1569,15 +1599,17 @@ verify_signature_algorithm(#state{
         true ->
             {ok, maybe_update_selected_sign_alg(State, PeerSignAlg, Role)};
         false ->
-            {error, {?ALERT_REC(?FATAL, ?HANDSHAKE_FAILURE,
+            {error, {?ALERT_REC(?FATAL, ?ILLEGAL_PARAMETER,
                                 "CertificateVerify uses unsupported signature algorithm"), State}}
     end.
 
-
-maybe_update_selected_sign_alg(#state{session = Session} = State, SignAlg, client) ->
-    State#state{session = Session#session{sign_alg = SignAlg}};
-maybe_update_selected_sign_alg(State, _, _) ->
-    State.
+maybe_update_selected_sign_alg(State, _, client) ->
+    %% Client verifies the server's scheme but doesn't record it —
+    %% session.sign_alg holds the client's own signature algorithm
+    %% for its CertificateVerify.
+    State;
+maybe_update_selected_sign_alg(#state{session = Session} = State, SignAlg, server) ->
+    State#state{session = Session#session{sign_alg = SignAlg}}.
 
 context_string(server) ->
     <<"TLS 1.3, server CertificateVerify">>;

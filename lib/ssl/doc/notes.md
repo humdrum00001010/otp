@@ -23,6 +23,68 @@ limitations under the License.
 
 This document describes the changes made to the SSL application.
 
+## SSL 11.7.6
+
+### Fixed Bugs and Malfunctions
+
+- Undecodable `certificate_authorities` names are now skipped, as they are just a hint.
+
+  Own Id: OTP-20327 Aux Id: [PR-11356], [GH-11338]
+
+- Corrected generated keylog information generated from the `keylog_hs` option in the corner case that it was invoked after the client had reached its connection state, but the server closed the connection before it reached its connection state.
+
+  Own Id: OTP-20358 Aux Id: [PR-11570], ERIERL-1356
+
+[PR-11356]: https://github.com/erlang/otp/pull/11356
+[GH-11338]: https://github.com/erlang/otp/issues/11338
+[PR-11570]: https://github.com/erlang/otp/pull/11570
+
+### Improvements and New Features
+
+- Added TLS-1.3 `selected_group` to `ssl:connection_information/2`.
+
+  Own Id: OTP-20326 Aux Id: [PR-11440]
+
+- The ECDHE-PSK Chacha20-Poly1305
+  cipher suites are now supported. This is relevant for TLS-1.2 (and lower).
+
+  Own Id: OTP-20331 Aux Id: [PR-11345]
+
+[PR-11440]: https://github.com/erlang/otp/pull/11440
+[PR-11345]: https://github.com/erlang/otp/pull/11345
+
+## SSL 11.7.5
+
+### Fixed Bugs and Malfunctions
+
+- Debugging keylog_hs callback used for logging handshake secrets on failed connections swapped the argument order in logging function confusing server and client side. The bug was introduced in OTP 28.5
+
+  Own Id: OTP-20350 Aux Id: [PR-11553], ERIERL-1354
+
+[PR-11553]: https://github.com/erlang/otp/pull/11553
+
+### Improvements and New Features
+
+- Hardening improvements of the ssl application.
+  
+  TLS distribution now defaults to TLS-1.3 instead of TLS-1.2 (TLS-1.2 is kept as fallback for rolling upgrades).
+  
+  TLS-1.2 server with {verify, verify_peer} now defaults reuse_sessions to false to mitigate the Triple Handshake attack (RFC 7627). Set {reuse_sessions, true} explicitly to restore previous behavior.
+  
+  Various missing or faulty sanity checks added and TLS alerts adjusted to comply with RFC MUST requirements, including: signature algorithm validation for intermediate certificates, TLS-1.3 session_id echo, pre_shared_key extension ordering, and renegotiation_info enforcement.
+  
+  Hardened and improved CRL support. Introduces new option allowed_hosts for the optional CRL HTTP fetching feature to restrict which hosts may be contacted. Internal/loopback IPs are now blocked by default (SSRF protection).
+  
+  TLS-1.3 client ticket handling is more robust (locked tickets are released on client crash). Server TLS-1.3 ticket handling and anti-replay Bloom filter performance are optimized.
+  
+  DTLS duplicate ChangeCipherSpec handling simplified, fixing potential state machine confusion (GH-11075).
+  
+  Process state formatting no longer leaks secrets in crash logs.
+
+  Own Id: OTP-20289 Aux Id: [PR-11478]
+
+[PR-11478]: https://github.com/erlang/otp/pull/11478
+
 ## SSL 11.7.4
 
 ### Fixed Bugs and Malfunctions
@@ -225,6 +287,38 @@ This document describes the changes made to the SSL application.
 [PR-10949]: https://github.com/erlang/otp/pull/10949
 [PR-10979]: https://github.com/erlang/otp/pull/10979
 [PR-11019]: https://github.com/erlang/otp/pull/11019
+
+## SSL 11.6.0.5
+
+### Fixed Bugs and Malfunctions
+
+- Debugging keylog_hs callback used for logging handshake secrets on failed connections swapped the argument order in logging function confusing server and client side. The bug was introduced in OTP 28.5
+
+  Own Id: OTP-20350 Aux Id: [PR-11553], ERIERL-1354
+
+[PR-11553]: https://github.com/erlang/otp/pull/11553
+
+### Improvements and New Features
+
+- Hardening improvements of the ssl application.
+  
+  TLS distribution now defaults to TLS-1.3 instead of TLS-1.2 (TLS-1.2 is kept as fallback for rolling upgrades).
+  
+  TLS-1.2 server with {verify, verify_peer} now defaults reuse_sessions to false to mitigate the Triple Handshake attack (RFC 7627). Set {reuse_sessions, true} explicitly to restore previous behavior.
+  
+  Various missing or faulty sanity checks added and TLS alerts adjusted to comply with RFC MUST requirements, including: signature algorithm validation for intermediate certificates, TLS-1.3 session_id echo, pre_shared_key extension ordering, and renegotiation_info enforcement.
+  
+  Hardened and improved CRL support. Introduces new option allowed_hosts for the optional CRL HTTP fetching feature to restrict which hosts may be contacted. Internal/loopback IPs are now blocked by default (SSRF protection).
+  
+  TLS-1.3 client ticket handling is more robust (locked tickets are released on client crash). Server TLS-1.3 ticket handling and anti-replay Bloom filter performance are optimized.
+  
+  DTLS duplicate ChangeCipherSpec handling simplified, fixing potential state machine confusion (GH-11075).
+  
+  Process state formatting no longer leaks secrets in crash logs.
+
+  Own Id: OTP-20289 Aux Id: [PR-11478]
+
+[PR-11478]: https://github.com/erlang/otp/pull/11478
 
 ## SSL 11.6.0.4
 
@@ -713,6 +807,30 @@ This document describes the changes made to the SSL application.
 [PR-9563]: https://github.com/erlang/otp/pull/9563
 [PR-9511]: https://github.com/erlang/otp/pull/9511
 [PR-9670]: https://github.com/erlang/otp/pull/9670
+
+## SSL 11.2.12.12
+
+### Improvements and New Features
+
+- Hardening improvements of the ssl application.
+  
+  TLS distribution now defaults to TLS-1.3 instead of TLS-1.2 (TLS-1.2 is kept as fallback for rolling upgrades).
+  
+  TLS-1.2 server with {verify, verify_peer} now defaults reuse_sessions to false to mitigate the Triple Handshake attack (RFC 7627). Set {reuse_sessions, true} explicitly to restore previous behavior.
+  
+  Various missing or faulty sanity checks added and TLS alerts adjusted to comply with RFC MUST requirements, including: signature algorithm validation for intermediate certificates, TLS-1.3 session_id echo, pre_shared_key extension ordering, and renegotiation_info enforcement.
+  
+  Hardened and improved CRL support. Introduces new option allowed_hosts for the optional CRL HTTP fetching feature to restrict which hosts may be contacted. Internal/loopback IPs are now blocked by default (SSRF protection).
+  
+  TLS-1.3 client ticket handling is more robust (locked tickets are released on client crash). Server TLS-1.3 ticket handling and anti-replay Bloom filter performance are optimized.
+  
+  DTLS duplicate ChangeCipherSpec handling simplified, fixing potential state machine confusion (GH-11075).
+  
+  Process state formatting no longer leaks secrets in crash logs.
+
+  Own Id: OTP-20289 Aux Id: [PR-11478]
+
+[PR-11478]: https://github.com/erlang/otp/pull/11478
 
 ## SSL 11.2.12.11
 

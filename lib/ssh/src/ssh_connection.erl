@@ -1126,21 +1126,29 @@ handle_msg(#ssh_msg_channel_request{recipient_channel = ChannelId,
                                        binary_to_list(SigName)});
 
 handle_msg(#ssh_msg_channel_request{recipient_channel = ChannelId,
-				    request_type = "subsystem",
-				    want_reply = WantReply,
-				    data = Data},
-	   #connection{channel_cache = Cache} = Connection, server, _SSH) ->
+                                    request_type = "subsystem",
+                                    want_reply = WantReply,
+                                    data = Data},
+           #connection{channel_cache = Cache} = Connection, server, _SSH) ->
     <<?DEC_BIN(SsName,_SsLen)>> = Data,
-    #channel{remote_id=RemoteId} = Channel = 
-	ssh_client_channel:cache_lookup(Cache, ChannelId), 
+    #channel{remote_id=RemoteId,user=User} = Channel =
+        ssh_client_channel:cache_lookup(Cache, ChannelId),
     Reply =
-        case start_subsystem(SsName, Connection, Channel,
-                             {subsystem, ChannelId, WantReply, binary_to_list(SsName)}) of
-            {ok, Pid} ->
-                erlang:monitor(process, Pid),
-                ssh_client_channel:cache_update(Cache, Channel#channel{user=Pid}),
-                channel_success_msg(RemoteId);
-            {error,_Error} ->
+        case session_started(Channel) of
+            false ->
+                case start_subsystem(SsName, Connection, Channel,
+                                     {subsystem, ChannelId, WantReply, binary_to_list(SsName)}) of
+                    {ok, Pid} ->
+                        erlang:monitor(process, Pid),
+                        ssh_client_channel:cache_update(Cache, Channel#channel{user=Pid,sys="subsystem"}),
+                        stop_old_channel_handler(User, self()),
+                        channel_success_msg(RemoteId);
+                    {error,_Error} ->
+                        channel_failure_msg(RemoteId)
+                end;
+            true ->
+                %% If shell, exec or any subsystem is active on the channel, starting another
+                %% subsystem must fail. See RFC 4254 6.5
                 channel_failure_msg(RemoteId)
         end,
     {[{connection_reply,Reply}], Connection};
@@ -1858,20 +1866,22 @@ backwards_compatible([Value| Rest], Acc) ->
 handle_cli_msg(C0, ChId, Reply0) ->
     Cache = C0#connection.channel_cache,
     Ch0 = ssh_client_channel:cache_lookup(Cache, ChId),
+    NewSys = update_sys(Reply0, Ch0#channel.sys),
     case Ch0#channel.user of
         undefined ->
             case start_cli(C0, ChId) of
                 {ok, Pid} ->
                     erlang:monitor(process, Pid),
-                    Ch = Ch0#channel{user = Pid},
+                    Ch = Ch0#channel{user = Pid, sys = NewSys},
                     ssh_client_channel:cache_update(Cache, Ch),
                     reply_msg(Ch, C0, Reply0);
                 {error, _Error} ->
                     Reply = {connection_reply, channel_failure_msg(Ch0#channel.remote_id)},
                     {[Reply], C0}
             end;
-        
         _ ->
+            Ch = Ch0#channel{sys = NewSys},
+            ssh_client_channel:cache_update(Cache, Ch),
             reply_msg(Ch0, C0, Reply0)
     end.
 
@@ -1943,3 +1953,37 @@ send_environment_vars(ConnectionRef, Channel, VarNames) ->
                              Var, Value, infinity)
               end
       end, success, VarNames).
+
+%%%----------------------------------------------------------------
+session_started(#channel{sys = "ssh"}) ->
+    %% No handler started yet
+    false;
+session_started(#channel{sys = Sys}) when Sys =:= "env"; Sys =:= "pty" ->
+    %% cli_handler was started by implicit:
+    %%  - 'env' (RFC 4254 6.6) or
+    %%  - 'pty-req' (RFC 4254 6.2)
+    %% we don't consider this a started session
+    false;
+session_started(#channel{}) ->
+    %% Some handler is started
+    true.
+
+%%%----------------------------------------------------------------
+stop_old_channel_handler(Pid, ConnectionManager) when is_pid(Pid) ->
+    Pid ! {ssh_channel_handler_replaced, ConnectionManager};
+stop_old_channel_handler(_Other, _ConnectionManager) ->
+    ok.
+
+%%%----------------------------------------------------------------
+update_sys(Reply, "ssh") ->
+    %% No handler started yet
+    atom_to_list(element(1, Reply));
+update_sys(Reply, Sys) when Sys =:= "pty"; Sys =:= "env" ->
+    %% cli_handler was started by implicit:
+    %%  - 'env' (RFC 4254 6.6) or
+    %%  - 'pty-req' (RFC 4254 6.2)
+    %% we don't consider this a started session
+    atom_to_list(element(1, Reply));
+update_sys(_Reply, Sys) ->
+    %% Some handler is started
+    Sys.

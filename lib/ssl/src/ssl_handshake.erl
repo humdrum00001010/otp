@@ -26,13 +26,6 @@
 -module(ssl_handshake).
 -moduledoc false.
 
--compile([{nowarn_unsafe_function, {crypto, private_decrypt, 4}},
-          {nowarn_unsafe_function, {crypto, private_encrypt, 4}},
-          {nowarn_unsafe_function, {public_key, decrypt_public, 3}},
-          {nowarn_unsafe_function, {public_key, decrypt_private, 3}},
-          {nowarn_unsafe_function, {public_key, encrypt_private, 3}},
-          {nowarn_unsafe_function, {public_key, encrypt_public, 3}}]).
-
 -include("ssl_handshake.hrl").
 -include("ssl_record.hrl").
 -include("ssl_cipher.hrl").
@@ -74,6 +67,7 @@
 %% Handle handshake messages
 -export([certify/9,
          certificate_verify/6,
+         certificate_verify_signature_algorithm/3,
          verify_signature/5,
 	 master_secret/4,
          server_key_exchange_hash/2,
@@ -434,6 +428,40 @@ certificate_verify(Signature, PublicKeyInfo, Version,
 	_ ->
 	    ?ALERT_REC(?FATAL, ?BAD_CERTIFICATE)
     end.
+
+%%--------------------------------------------------------------------
+-spec certificate_verify_signature_algorithm({atom(), atom()},
+                                             [ssl:sign_scheme() | {atom(), atom()}] | undefined,
+                                             ssl_record:ssl_version()) ->
+          valid | #alert{}.
+%%
+%% Description: RFC 9155 §5 - the server (or client, for mutual auth)
+%% receiving a CertificateVerify in (D)TLS 1.2 must abort with
+%% illegal_parameter if the signature uses a hash/signature algorithm that
+%% was not offered (in particular MD5 or SHA-1, which are excluded from the
+%% default signature_algs). Mirrors the TLS-1.3 check in
+%% tls_handshake_1_3:verify_signature_algorithm/2.
+%%--------------------------------------------------------------------
+certificate_verify_signature_algorithm(_HashSign, undefined, _Version) ->
+    %% No signature_algs configured/advertised (e.g. only pre-TLS-1.2
+    %% negotiated) - the peer had no list to violate.
+    valid;
+certificate_verify_signature_algorithm(HashSign, SupportedHashSigns, Version)
+  when ?TLS_GTE(Version, ?TLS_1_2) ->
+    %% Compare against the algorithms advertised in the CertificateRequest,
+    %% i.e. the TLS-1.2 tuple form ({Hash, Sign}, e.g. {sha512, rsa_pss_rsae})
+    %% produced by signature_schemes_1_2/1 - which matches the negotiated
+    %% CertHashSign representation.
+    case lists:member(HashSign, ssl_cipher:signature_schemes_1_2(SupportedHashSigns)) of
+        true ->
+            valid;
+        false ->
+            ?ALERT_REC(?FATAL, ?ILLEGAL_PARAMETER,
+                       {certificate_verify_bad_signature_algorithm, HashSign})
+    end;
+certificate_verify_signature_algorithm(_HashSign, _SupportedHashSigns, _Version) ->
+    %% Pre-TLS-1.2 uses the fixed md5sha construct, not negotiated schemes.
+    valid.
 %%--------------------------------------------------------------------
 -spec verify_signature(ssl_record:ssl_version(), binary(), {term(), term()}, binary(),
                        public_key_info()) -> true | false.
@@ -937,6 +965,20 @@ decode_handshake(Version, ?SERVER_HELLO,
        session_id = Session_ID,
        cipher_suite = Cipher_suite,
        extensions = HelloExtensions};
+%% RFC 8446 §4.1.3 (TLS-1.3) and RFC 5246 §7.4.1.3 (TLS-1.2): the server's
+%% legacy_compression_method must be null (0). A client that offered only the
+%% null method and receives any other value MUST abort with illegal_parameter.
+%% Match ServerHello messages whose compression byte is not ?NO_COMPRESSION
+%% (both the no-extensions and with-extensions layouts) and reject them
+%% specifically, rather than letting them fall through to the generic
+%% decode_error catch-all.
+decode_handshake(_Version, ?SERVER_HELLO,
+                 <<?BYTE(_Major), ?BYTE(_Minor), _Random:32/binary,
+                   ?BYTE(SID_length), _Session_ID:SID_length/binary,
+                   _Cipher_suite:2/binary, ?BYTE(CompMethod),_/binary>>)
+  when CompMethod =/= ?NO_COMPRESSION ->
+    throw(?ALERT_REC(?FATAL, ?ILLEGAL_PARAMETER,
+                     {invalid_compression_method, CompMethod}));
 decode_handshake(_Version, ?CERTIFICATE, <<?UINT24(ACLen), ASN1Certs:ACLen/binary>>) ->
     #certificate{asn1_certificates = certs_to_list(ASN1Certs)};
 %% RFC 6066, servers return a certificate response along with their certificate
@@ -1733,7 +1775,15 @@ select_hashsign({#hash_sign_algos{hash_sign_algos = ClientHashSigns},
                 true ->
                     ClientSignatureSchemes;
                 false ->
-                    do_select_hashsign(ClientSignatureSchemes, PublicKeyAlgo, SupportedHashSigns)
+                    %% The ServerKeyExchange signature is a handshake
+                    %% signature, governed by the client's signature_algs
+                    %% extension (ClientHashSigns) - NOT signature_algs_cert
+                    %% (ClientSignatureSchemes), which governs certificate
+                    %% chain signatures (RFC 8446 4.2.3). Selecting from the
+                    %% cert-signature list breaks configurations where the
+                    %% handshake signature_algs (e.g. rsa_pss_rsae) differ
+                    %% from the certificate's algorithm (e.g. rsa_pkcs1).
+                    do_select_hashsign(ClientHashSigns, PublicKeyAlgo, SupportedHashSigns)
             end;
         false ->
             ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY, no_suitable_signature_algorithm)
@@ -2185,14 +2235,15 @@ path_validation_options(Opts, ValidationFunAndState) ->
 
 apply_user_fun(Fun, OtpCert, DerCert, VerifyResult0, UserState0, SslState, CertPath, LogLevel) when
       VerifyResult0 == valid; VerifyResult0 == valid_peer ->
-    VerifyResult = maybe_check_hostname(OtpCert, VerifyResult0, SslState, LogLevel),
+    VerifyResult = tls_verify_fun(OtpCert, VerifyResult0, SslState, LogLevel),
     case apply_fun(Fun, OtpCert, DerCert, VerifyResult, UserState0) of
 	{Valid, UserState} when (Valid == valid) orelse (Valid == valid_peer) ->
 	    case cert_status_check(OtpCert, SslState, VerifyResult, CertPath, LogLevel) of
 		valid ->
 		    {Valid, {SslState, UserState}};
 		Result ->
-		    apply_user_fun(Fun, OtpCert, DerCert, Result, UserState, SslState, CertPath, LogLevel)
+                    apply_user_fun(Fun, OtpCert, DerCert, Result, UserState,
+                                   SslState, CertPath, LogLevel)
 	    end;
 	{fail, _} = Fail ->
 	    Fail
@@ -2214,15 +2265,20 @@ apply_fun(Fun, OtpCert, DerCert, ExtensionOrError, UserState) ->
             Fun(OtpCert, ExtensionOrError, UserState)
     end.
 
-maybe_check_hostname(OtpCert, valid_peer, SslState, LogLevel) ->
+tls_verify_fun(OtpCert, valid_peer, SslState, LogLevel) ->
     case ssl_certificate:validate(OtpCert, valid_peer, SslState, LogLevel) of
         {valid, _} ->
             valid_peer;
         {fail, Reason} ->
             Reason
     end;
-maybe_check_hostname(_, valid, _, _) ->
-    valid.
+tls_verify_fun(OtpCert, valid, SslState, LogLevel) ->
+    case ssl_certificate:validate(OtpCert, valid, SslState, LogLevel) of
+        {valid, _} ->
+            valid;
+        {fail, Reason} ->
+            Reason
+    end.
 
 path_validation_alert({bad_cert, cert_expired}, _, _) ->
     ?ALERT_REC(?FATAL, ?CERTIFICATE_EXPIRED);
@@ -3160,12 +3216,15 @@ decode_extensions(<<?UINT16(?SUPPORTED_VERSIONS_EXT), ?UINT16(Len),
                                   versions = decode_versions(Versions)}});
 
 decode_extensions(<<?UINT16(?SUPPORTED_VERSIONS_EXT), ?UINT16(Len),
-                       ?UINT16(SelectedVersion), Rest/binary>>, Version, MessageType, Acc)
-  when Len =:= 2, SelectedVersion =:= 16#0304 ->
+                       ?BYTE(Major), ?BYTE(Minor), Rest/binary>>, Version, MessageType, Acc)
+  when Len =:= 2 ->
     assert_unique_extension(server_hello_selected_version, Acc),
+    %% Decode any version — RFC 8446 §4.2.1 requires the client to
+    %% abort with illegal_parameter if this is not TLS 1.3; that check
+    %% is performed downstream in validate_server_version/1.
     decode_extensions(Rest, Version, MessageType,
                       Acc#{server_hello_selected_version =>
-                               #server_hello_selected_version{selected_version = ?TLS_1_3}});
+                               #server_hello_selected_version{selected_version = {Major, Minor}}});
 
 decode_extensions(<<?UINT16(?KEY_SHARE_EXT), ?UINT16(Len),
                        ExtData:Len/binary, Rest/binary>>,
@@ -3183,6 +3242,7 @@ decode_extensions(<<?UINT16(?KEY_SHARE_EXT), ?UINT16(Len),
     <<?UINT16(EnumGroup),?UINT16(KeyLen),KeyExchange0:KeyLen/binary>> = ExtData,
     Group =  tls_v1:enum_to_group(EnumGroup),
     KeyExchange = maybe_dec_server_hybrid_share(Group, KeyExchange0),
+    assert_unique_extension(key_share, Acc),
     decode_extensions(Rest, Version, MessageType,
                       Acc#{key_share =>
                                #key_share_server_hello{
@@ -3195,6 +3255,7 @@ decode_extensions(<<?UINT16(?KEY_SHARE_EXT), ?UINT16(Len),
                     ExtData:Len/binary, Rest/binary>>,
                   Version, MessageType = hello_retry_request, Acc) ->
     <<?UINT16(Group)>> = ExtData,
+    assert_unique_extension(key_share, Acc),
     decode_extensions(Rest, Version, MessageType,
                       Acc#{key_share =>
                                #key_share_hello_retry_request{
@@ -3214,6 +3275,15 @@ decode_extensions(<<?UINT16(?PRE_SHARED_KEY_EXT), ?UINT16(Len),
                   Version, MessageType = client_hello, Acc) ->
     <<?UINT16(IdLen),Identities:IdLen/binary,?UINT16(BLen),Binders:BLen/binary>> = ExtData,
     assert_unique_extension(pre_shared_key, Acc),
+    %% RFC 8446 §4.2.11: pre_shared_key MUST be the last extension in
+    %% the ClientHello.  Abort if trailing data follows.
+    case Rest of
+        <<>> ->
+            ok;
+        _ ->
+            throw(?ALERT_REC(?FATAL, ?ILLEGAL_PARAMETER,
+                             pre_shared_key_not_last_extension))
+    end,
     decode_extensions(Rest, Version, MessageType,
                       Acc#{pre_shared_key =>
                                #pre_shared_key_client_hello{
@@ -3399,7 +3469,7 @@ maybe_dec_client_hybrid_share(_, Share) ->
 dec_sni(<<?BYTE(?SNI_NAMETYPE_HOST_NAME), ?UINT16(Len),
                 HostName:Len/binary, _/binary>>) ->
     #sni{hostname = binary_to_list(HostName)};
-dec_sni(<<?BYTE(_), ?UINT16(Len), _:Len, Rest/binary>>) -> dec_sni(Rest);
+dec_sni(<<?BYTE(_), ?UINT16(Len), _:Len/binary, Rest/binary>>) -> dec_sni(Rest);
 dec_sni(_) -> undefined.
 
 decode_alpn(undefined) ->
@@ -3486,7 +3556,13 @@ decode_psk_binders(<<?BYTE(Len), Binder:Len/binary, Rest/binary>>, Acc) ->
 decode_cert_auths(<<>>, Acc) ->
     lists:reverse(Acc);
 decode_cert_auths(<<?UINT16(Len), Auth:Len/binary, Rest/binary>>, Acc) ->
-    decode_cert_auths(Rest, [public_key:pkix_normalize_name(Auth) | Acc]).
+    try public_key:pkix_normalize_name(Auth) of
+        CertAuth ->
+            decode_cert_auths(Rest, [CertAuth | Acc])
+    catch
+        _:_ ->
+            decode_cert_auths(Rest, Acc)
+    end.
 
 %% encode/decode stream of certificate data to/from list of certificate data
 certs_to_list(ASN1Certs) ->
@@ -3937,7 +4013,7 @@ handle_renegotiation_info(_, _RecordCB, _, #renegotiation_info{renegotiated_conn
                           ConnectionStates, false, _) ->
     {ok, ssl_record:set_renegotiation_flag(true, ConnectionStates)};
 
-handle_renegotiation_info(_, _RecordCB, server, undefined, ConnectionStates, _, CipherSuites) ->
+handle_renegotiation_info(_, _RecordCB, server, undefined, ConnectionStates, false, CipherSuites) ->
     case is_member(?TLS_EMPTY_RENEGOTIATION_INFO_SCSV, CipherSuites) of
 	true ->
 	    {ok, ssl_record:set_renegotiation_flag(true, ConnectionStates)};

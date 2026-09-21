@@ -2,9 +2,9 @@
 %% %CopyrightBegin%
 %%
 %% SPDX-License-Identifier: Apache-2.0
-%% 
-%% Copyright Ericsson AB 2004-2025. All Rights Reserved.
-%% 
+%%
+%% Copyright Ericsson AB 2004-2026. All Rights Reserved.
+%%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
 %% You may obtain a copy of the License at
@@ -16,7 +16,7 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%% 
+%%
 %% %CopyrightEnd%
 %%
 %%%----------------------------------------------------------------
@@ -41,7 +41,8 @@
          prefix/1, split/1, replace/1, find/1,
          lexemes/1, nth_lexeme/1, cd_gc/1,
          jaro_similarity/1,
-         meas/1
+         meas/1,
+         doctests/1
         ]).
 
 -export([len/1,old_equal/1,old_concat/1,chr_rchr/1,str_rstr/1]).
@@ -60,7 +61,7 @@ suite() ->
      {timetrap,{minutes,1}}].
 
 all() ->
-    [{group, chardata}, {group, list_string}].
+    [{group, chardata}, {group, list_string}, doctests].
 
 groups() ->
     [{chardata,
@@ -343,6 +344,7 @@ trim(_) ->
     ?TEST(["..h", ".e", <<"j..">>], [both, ". "], "h.ej"),
     ?TEST(["..h", <<".ejsa"/utf8>>, "n.."], [both, ". "], "h.ejsan"),
     %% Test that it behaves with graphemes (i.e. nfd tests are the hard part)
+    ?TEST([<<"\r \r">>, []], [trailing, [$\r, [$\r, $\n]]], "\r "),
     ?TEST([1013,101,778,101,101], [trailing, [101]], [1013,101,778]),
     ?TEST("aaåaa", [both, "a"], "å"),
     ?TEST(["aaa",778,"äöoo"], [both, "ao"], "åäö"),
@@ -1659,3 +1661,11 @@ join(Config) when is_list(Config) ->
     %% invalid arg type
     ?assertError(_, string:join([apa], "")),
     ok.
+
+-include_lib("kernel/include/eep48.hrl").
+
+doctests(_Config) ->
+    {ok, #docs_v1{ docs = Docs }} = code:get_doc(string),
+    ObsoleteFunctions = [{F,A} || {{function,F,A},_,_,#{},#{group := ~"Obsolete API functions"}} <- Docs],
+    ok = ct_doctest:module(string, [{skipped_blocks, 1},
+                                        {missing_tests, [{trim, 2}] ++ ObsoleteFunctions}]).

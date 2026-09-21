@@ -101,11 +101,11 @@ meet(any, T) ->
 meet(T, any) ->
     verified_type(T);
 meet(#t_union{}=A, B) ->
-    meet_unions(A, B);
+    verified_type(meet_unions(A, B));
 meet(A, #t_union{}=B) ->
-    meet_unions(B, A);
+    verified_type(meet_unions(B, A));
 meet(A, B) ->
-    glb(A, B).
+    verified_type(glb(A, B)).
 
 meet_unions(#t_union{atom=AtomA,list=ListA,number=NumberA,
                      tuple_set=TSetA,native_record_set=NSetA,
@@ -541,11 +541,10 @@ subtract(#t_atom{elements=[_|_]=Set0}, #t_atom{elements=[_|_]=Set1}) ->
     end;
 subtract(#t_bitstring{size_unit=UnitA}=T, #t_bs_matchable{tail_unit=UnitB}) ->
     subtract_matchable(T, UnitA, UnitB);
-subtract(#t_bitstring{appendable=App,size_unit=UnitA}=T,
-         #t_bitstring{appendable=App,size_unit=UnitB}) ->
-    subtract_matchable(T, UnitA, UnitB);
-subtract(#t_bitstring{}=T, #t_bitstring{}) ->
+subtract(#t_bitstring{appendable=false}=T, #t_bitstring{appendable=true}) ->
     T;
+subtract(#t_bitstring{size_unit=UnitA}=T, #t_bitstring{size_unit=UnitB}) ->
+    subtract_matchable(T, UnitA, UnitB);
 subtract(#t_bs_context{tail_unit=UnitA}=T, #t_bs_matchable{tail_unit=UnitB}) ->
     subtract_matchable(T, UnitA, UnitB);
 subtract(#t_bs_context{tail_unit=UnitA}=T, #t_bs_context{tail_unit=UnitB}) ->

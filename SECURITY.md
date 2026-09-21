@@ -8,6 +8,7 @@ GitHub issues, discussions, or pull requests.
 If you believe you have found a security vulnerability in this repository,
 please report it to erlang-security@erlang.org or https://github.com/erlang/otp/security.
 
+
 ## Supported Versions
 
 Erlang/OTP supports the last 3 OTP releases with security updates and patches.

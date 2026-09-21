@@ -129,7 +129,7 @@
 -export([callback_mode/0,
          terminate/3,
          code_change/4,
-         format_status/2]).
+         format_status/1]).
 
 %% Tracing
 -export([handle_trace/3]).
@@ -301,6 +301,7 @@ wait_cert_verify(internal, #certificate_verify{signature = Signature,
                                                        client_certificate_status = needs_verifying,
                                                        public_key_info = PubKeyInfo} = HsEnv0,
                         connection_env = #connection_env{negotiated_version = Version},
+                        ssl_options = SslOpts,
                         session = #session{master_secret = MasterSecret} = Session0
                        } = State) ->
 
@@ -308,8 +309,20 @@ wait_cert_verify(internal, #certificate_verify{signature = Signature,
     %% Use negotiated value if TLS-1.2 otherwise return default
     HashSign = tls_dtls_gen_connection:negotiated_hashsign(CertHashSign, KexAlg,
                                                            PubKeyInfo, TLSVersion),
-    case ssl_handshake:certificate_verify(Signature, PubKeyInfo,
-					  TLSVersion, HashSign, MasterSecret, Hist) of
+    %% RFC 9155 §5: reject a CertificateVerify that uses a signature
+    %% algorithm the server did not offer (e.g. MD5/SHA-1 by default).
+    SupportedHashSigns = maps:get(signature_algs, SslOpts, undefined),
+    Result =
+        case ssl_handshake:certificate_verify_signature_algorithm(HashSign,
+                                                                  SupportedHashSigns,
+                                                                  TLSVersion) of
+            valid ->
+                ssl_handshake:certificate_verify(Signature, PubKeyInfo,
+                                                 TLSVersion, HashSign, MasterSecret, Hist);
+            #alert{} = SignAlgAlert ->
+                SignAlgAlert
+        end,
+    case Result of
 	valid ->
             HsEnv = HsEnv0#handshake_env{client_certificate_status = verified},
 	    Connection:next_event(cipher, no_record,
@@ -417,8 +430,8 @@ callback_mode() ->
 terminate(Reason, StateName, State) ->
     ssl_gen_statem:terminate(Reason, StateName, State).
 
-format_status(Type, Data) ->
-    ssl_gen_statem:format_status(Type, Data).
+format_status(Data) ->
+    ssl_gen_statem:format_status(Data).
 
 code_change(_OldVsn, StateName, State, _) ->
     {ok, StateName, State}.
