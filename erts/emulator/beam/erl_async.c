@@ -430,7 +430,7 @@ static void *async_main(void* arg)
     ERTS_MSACC_DECLARE_CACHE();
 
     while (1) {
-	ErtsThrQPrepEnQ_t *prep_enq;
+        ErtsThrQPrepEnQ_t *prep_enq = NULL;
 	ErtsAsync *a = async_get(&aq->thr_q, tse, &prep_enq);
 	if (is_nil(a->port))
 	    break; /* Time to die */
