@@ -254,21 +254,21 @@ static ERTS_INLINE ErtsAsync *async_get(ErtsThrQ_t *q,
     while (1) {
 	ErtsAsync *a = (ErtsAsync *) erts_thr_q_dequeue(q);
 	if (a) {
-	    ErtsThrQFinDeQ_t current_fin_deq;
+            ErtsThrQFinDeQ_t current_fin_deq;
 
-	    erts_thr_q_get_finalize_dequeue_data(q, &current_fin_deq);
-	    if (saved_fin_deq)
-		erts_thr_q_append_finalize_dequeue_data(&current_fin_deq,
-							     &fin_deq);
-	    if (is_nil(a->port)) {
-		/* The exit marker is shared; free on the dequeuing worker. */
-		while (erts_thr_q_finalize_dequeue(&current_fin_deq)) {
-		    /* Finish the bounded finalizer before the worker exits. */
-		}
-	    } else {
-		*prep_enq = a->q.prep_enq;
-		a->q.fin_deq = current_fin_deq;
-	    }
+            erts_thr_q_get_finalize_dequeue_data(q, &current_fin_deq);
+            if (saved_fin_deq)
+                erts_thr_q_append_finalize_dequeue_data(
+                    &current_fin_deq, &fin_deq);
+            if (is_nil(a->port)) {
+                /* The exit marker is shared; free on the dequeuing worker. */
+                while (erts_thr_q_finalize_dequeue(&current_fin_deq)) {
+                    /* Finish the bounded finalizer before the worker exits. */
+                }
+            } else {
+                *prep_enq = a->q.prep_enq;
+                a->q.fin_deq = current_fin_deq;
+            }
 	    return a;
 	}
 
